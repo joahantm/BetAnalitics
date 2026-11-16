@@ -1,0 +1,7 @@
+streamlit
+requests
+pandas
+numpy
+scipy
+feedparser
+psycopg2-binary
