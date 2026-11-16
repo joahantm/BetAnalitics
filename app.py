@@ -6,7 +6,7 @@ from scipy.stats import poisson
 import sqlite3
 import psycopg2
 import feedparser
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 # ==========================================
@@ -49,12 +49,12 @@ def obtener_secreto(clave, respaldo=""):
     except Exception:
         return respaldo
 
-FOOTBALL_API_KEY = obtener_secreto("FOOTBALL_API_KEY", " 5a2477c3926f49f4b3975a8eb3aa9c08")
-ODDS_API_KEY = obtener_secreto("ODDS_API_KEY", "TU_CLAVE_DE_THE_ODDS_API")
+FOOTBALL_API_KEY = obtener_secreto("FOOTBALL_API_KEY", "TU_API_KEY_FOOTBALL_DATA").strip()
+ODDS_API_KEY = obtener_secreto("ODDS_API_KEY", "TU_CLAVE_DE_THE_ODDS_API").strip()
 DATABASE_URL = obtener_secreto(
     "DATABASE_URL",
     "postgresql://postgres.sygcdkgatiuhiwrzopqi:790130JTm%24%40%40@aws-0-us-east-1.pooler.supabase.com:6543/postgres"
-)
+).strip()
 
 ZONA_HORARIA = ZoneInfo("America/Tijuana")
 
@@ -228,7 +228,6 @@ def obtener_datos_liga(codigo_liga):
     df_jugados = pd.DataFrame(jugados)
     df_proximos = pd.DataFrame(proximos)
 
-    # Tabla de posiciones
     df_tabla = pd.DataFrame()
     try:
         r_s = requests.get(url_standings, headers=headers, timeout=10)
@@ -331,23 +330,17 @@ def obtener_noticias_partido(local, visitante):
 # ==========================================
 # 5. MOTOR MATEMÁTICO (BAYES-DIXON-COLES + KELLY)
 # ==========================================
-def calcular_probabilidades_partido(df, local, visitante, k_bayes=3.0, ultimos_n=10):
+def calcular_probabilidades_partido(df, local, visitante, k_bayes=3.0, ventana_opcion="Toda la temporada"):
     if df.empty:
         return None
 
-    # Promedios globales de la liga
     avg_home_gf = df["GolesLocal"].mean()
     avg_away_gf = df["GolesVisitante"].mean()
     if avg_home_gf <= 0 or avg_away_gf <= 0:
         return None
 
-    # Temporada completa
     h_all = df[df["Local"] == local]
     a_all = df[df["Visitante"] == visitante]
-
-    # Forma reciente (últimos N partidos en condición)
-    h_rec = h_all.tail(ultimos_n)
-    a_rec = a_all.tail(ultimos_n)
 
     def fuerza_bayesiana(goles_serie, media_liga, k):
         n = len(goles_serie)
@@ -356,27 +349,43 @@ def calcular_probabilidades_partido(df, local, visitante, k_bayes=3.0, ultimos_n
         media_suavizada = (goles_serie.sum() + k * media_liga) / (n + k)
         return media_suavizada / media_liga
 
-    # Híbrido 70% temporada + 30% forma reciente
-    att_h = 0.7 * fuerza_bayesiana(h_all["GolesLocal"], avg_home_gf, k_bayes) + \
-            0.3 * fuerza_bayesiana(h_rec["GolesLocal"], avg_home_gf, k_bayes)
-    def_h = 0.7 * fuerza_bayesiana(h_all["GolesVisitante"], avg_away_gf, k_bayes) + \
-            0.3 * fuerza_bayesiana(h_rec["GolesVisitante"], avg_away_gf, k_bayes)
+    # Ajuste dinámico según la ventana elegida (3, 5 o Toda la temporada)
+    if ventana_opcion == "Últimos 3":
+        n_rec = 3
+        peso_rec = 0.70
+        k_ef = max(1.0, k_bayes * 0.6)
+    elif ventana_opcion == "Últimos 5":
+        n_rec = 5
+        peso_rec = 0.55
+        k_ef = max(1.5, k_bayes * 0.8)
+    else:
+        n_rec = 10
+        peso_rec = 0.30
+        k_ef = k_bayes
 
-    att_a = 0.7 * fuerza_bayesiana(a_all["GolesVisitante"], avg_away_gf, k_bayes) + \
-            0.3 * fuerza_bayesiana(a_rec["GolesVisitante"], avg_away_gf, k_bayes)
-    def_a = 0.7 * fuerza_bayesiana(a_all["GolesLocal"], avg_home_gf, k_bayes) + \
-            0.3 * fuerza_bayesiana(a_rec["GolesLocal"], avg_home_gf, k_bayes)
+    peso_temp = 1.0 - peso_rec
+    h_rec = h_all.tail(n_rec)
+    a_rec = a_all.tail(n_rec)
+
+    att_h = peso_temp * fuerza_bayesiana(h_all["GolesLocal"], avg_home_gf, k_ef) + \
+            peso_rec * fuerza_bayesiana(h_rec["GolesLocal"], avg_home_gf, k_ef)
+    def_h = peso_temp * fuerza_bayesiana(h_all["GolesVisitante"], avg_away_gf, k_ef) + \
+            peso_rec * fuerza_bayesiana(h_rec["GolesVisitante"], avg_away_gf, k_ef)
+
+    att_a = peso_temp * fuerza_bayesiana(a_all["GolesVisitante"], avg_away_gf, k_ef) + \
+            peso_rec * fuerza_bayesiana(a_rec["GolesVisitante"], avg_away_gf, k_ef)
+    def_a = peso_temp * fuerza_bayesiana(a_all["GolesLocal"], avg_home_gf, k_ef) + \
+            peso_rec * fuerza_bayesiana(a_rec["GolesLocal"], avg_home_gf, k_ef)
 
     lambda_h = max(0.15, att_h * def_a * avg_home_gf)
     lambda_a = max(0.15, att_a * def_h * avg_away_gf)
 
-    # Matriz vectorizada NumPy (0 a 9 goles)
     goles = np.arange(10)
     p_h = poisson.pmf(goles, lambda_h)
     p_a = poisson.pmf(goles, lambda_a)
     matriz = np.outer(p_h, p_a)
 
-    # Corrección Dixon-Coles para marcadores bajos (0-0, 1-0, 0-1, 1-1)
+    # Corrección Dixon-Coles
     rho = -0.10
     matriz[0, 0] *= (1 - lambda_h * lambda_a * rho)
     matriz[1, 0] *= (1 + lambda_a * rho)
@@ -392,7 +401,6 @@ def calcular_probabilidades_partido(df, local, visitante, k_bayes=3.0, ultimos_n
     prob_over25 = float(np.sum(matriz[(idx_h + idx_a) > 2])) * 100
     prob_btts = float(np.sum(matriz[(idx_h > 0) & (idx_a > 0)])) * 100
 
-    # Top 3 marcadores exactos
     flat_idx = np.argsort(matriz.ravel())[::-1][:3]
     top_marcadores = [
         (f"{i // 10}-{i % 10}", float(matriz.ravel()[i]) * 100)
@@ -424,19 +432,51 @@ def calcular_stake_kelly(prob_pct, cuota, bankroll, fraccion=0.25, max_pct=2.5):
     stake_monetario = round(bankroll * (pct_aplicado / 100.0), 2)
     return round(pct_aplicado, 2), stake_monetario
 
-def generar_insights(df, local, visitante):
-    insights = []
-    h_df = df[df["Local"] == local].tail(5)
-    a_df = df[df["Visitante"] == visitante].tail(5)
-    if len(h_df) >= 3:
+def obtener_datos_destacados(df, local, visitante, ventana_opcion="Toda la temporada"):
+    n_muestra = 3 if ventana_opcion == "Últimos 3" else (5 if ventana_opcion == "Últimos 5" else 50)
+    h_df = df[df["Local"] == local].tail(n_muestra)
+    a_df = df[df["Visitante"] == visitante].tail(n_muestra)
+
+    destacados = []
+    metricas = {}
+
+    if not h_df.empty:
+        gf_h = h_df["GolesLocal"].mean()
+        gc_h = h_df["GolesVisitante"].mean()
         btts_h = ((h_df["GolesLocal"] > 0) & (h_df["GolesVisitante"] > 0)).mean() * 100
-        if btts_h >= 80:
-            insights.append(f"🔥 **{local}** cumple Ambos Marcan en el **{btts_h:.0f}%** de sus últimos {len(h_df)} juegos en casa.")
-    if len(a_df) >= 3:
-        ov_a = ((a_df["GolesLocal"] + a_df["GolesVisitante"]) > 2).mean() * 100
-        if ov_a >= 80:
-            insights.append(f"⚡ **{visitante}** supera los 2.5 goles en el **{ov_a:.0f}%** de sus últimos {len(a_df)} juegos fuera.")
-    return insights
+        ov25_h = ((h_df["GolesLocal"] + h_df["GolesVisitante"]) > 2).mean() * 100
+        cs_h = (h_df["GolesVisitante"] == 0).mean() * 100
+        win_h = (h_df["GolesLocal"] > h_df["GolesVisitante"]).mean() * 100
+        metricas["h"] = (len(h_df), gf_h, gc_h, btts_h, ov25_h, cs_h, win_h)
+
+        if win_h >= 65:
+            destacados.append(f"🏟️ **Fortaleza Local:** {local} ganó el **{win_h:.0f}%** ({int(round(win_h*len(h_df)/100))}/{len(h_df)}) de sus últimos juegos en casa.")
+        if btts_h >= 65:
+            destacados.append(f"🔥 **Tendencia BTTS ({local}):** Ambos anotaron en el **{btts_h:.0f}%** de sus últimos {len(h_df)} partidos como local.")
+        if ov25_h >= 65:
+            destacados.append(f"⚽ **Lluvia de Goles ({local}):** Hubo +2.5 goles en el **{ov25_h:.0f}%** de sus últimos {len(h_df)} juegos en casa.")
+        if cs_h >= 50:
+            destacados.append(f"🛡️ **Muralla ({local}):** Dejó su portería en cero en el **{cs_h:.0f}%** de sus últimos {len(h_df)} juegos de local.")
+
+    if not a_df.empty:
+        gf_a = a_df["GolesVisitante"].mean()
+        gc_a = a_df["GolesLocal"].mean()
+        btts_a = ((a_df["GolesLocal"] > 0) & (a_df["GolesVisitante"] > 0)).mean() * 100
+        ov25_a = ((a_df["GolesLocal"] + a_df["GolesVisitante"]) > 2).mean() * 100
+        win_a = (a_df["GolesVisitante"] > a_df["GolesLocal"]).mean() * 100
+        metricas["a"] = (len(a_df), gf_a, gc_a, btts_a, ov25_a, win_a)
+
+        if win_a >= 55:
+            destacados.append(f"✈️ **Peligro Visitante:** {visitante} ganó el **{win_a:.0f}%** ({int(round(win_a*len(a_df)/100))}/{len(a_df)}) de sus últimos juegos fuera.")
+        if btts_a >= 65:
+            destacados.append(f"🔥 **Tendencia BTTS ({visitante}):** Ambos anotaron en el **{btts_a:.0f}%** de sus últimos {len(a_df)} partidos fuera.")
+        if ov25_a >= 65:
+            destacados.append(f"⚡ **Partidos Abiertos ({visitante}):** Superó los 2.5 goles en el **{ov25_a:.0f}%** de sus últimas {len(a_df)} salidas.")
+
+    if not destacados:
+        destacados.append("📊 Ambos equipos muestran registros equilibrados sin rachas extremas en esta muestra.")
+
+    return destacados, metricas
 
 def cargar_partido_callback(eq_local, eq_vis):
     st.session_state["sel_local"] = eq_local
@@ -475,7 +515,6 @@ with st.sidebar:
     st.divider()
     st.subheader("⚙️ Parámetros del Modelo")
     k_bayes = st.slider("Suavizado Bayesiano (K)", 1.0, 6.0, 3.0, 0.5)
-    ultimos_n = st.slider("Ventana forma reciente (partidos)", 5, 15, 10, 1)
 
 # ==========================================
 # 7. ENCABEZADO Y REVISIÓN RÁPIDA MÓVIL (IPHONE)
@@ -529,7 +568,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 ])
 
 # ------------------------------------------
-# TAB 1: ANÁLISIS Y DETECTOR DE VALOR / OVERBET
+# TAB 1: ANÁLISIS, VARIANZA Y DATOS DESTACADOS
 # ------------------------------------------
 with tab1:
     if df_jugados.empty:
@@ -545,10 +584,18 @@ with tab1:
         local = csel1.selectbox("🏠 Local", equipos, key="sel_local")
         visitante = csel2.selectbox("✈️ Visitante", equipos, key="sel_vis")
 
+        # Botón / Selector rápido de Varianza y Muestra (3, 5, Toda la temporada)
+        ventana_opcion = st.radio(
+            "📐 Muestra / Ajuste de Varianza:",
+            options=["Últimos 3", "Últimos 5", "Toda la temporada"],
+            index=2,
+            horizontal=True
+        )
+
         if local == visitante:
             st.warning("Selecciona dos equipos distintos.")
         else:
-            res = calcular_probabilidades_partido(df_jugados, local, visitante, k_bayes, ultimos_n)
+            res = calcular_probabilidades_partido(df_jugados, local, visitante, k_bayes, ventana_opcion)
             if res:
                 partido_str = f"{local} vs {visitante}"
 
@@ -567,14 +614,32 @@ with tab1:
                     st.markdown(f"### {visitante}")
                     st.caption(f"Goles esperados (xG): **{res['lambda_a']:.2f}**")
 
-                # Alertas de tendencias y marcadores exactos
-                for ins in generar_insights(df_jugados, local, visitante):
-                    st.info(ins)
-
                 st.caption(
                     "🎯 **Marcadores exactos más probables:** " +
                     " • ".join([f"**{m}** ({p:.1f}%)" for m, p in res["top_marcadores"]])
                 )
+
+                # BLOQUE DE DATOS DESTACADOS Y MÉTRICAS COMPARATIVAS
+                destacados, metricas = obtener_datos_destacados(df_jugados, local, visitante, ventana_opcion)
+                with st.expander(f"💡 Datos Destacados y Tendencias ({ventana_opcion})", expanded=True):
+                    for d_txt in destacados:
+                        st.markdown(f"- {d_txt}")
+
+                    if "h" in metricas and "a" in metricas:
+                        nh, gfh, gch, bttsh, ovh, csh, winh = metricas["h"]
+                        na, gfa, gca, bttsa, ova, wina = metricas["a"]
+                        st.divider()
+                        dm1, dm2 = st.columns(2)
+                        dm1.markdown(
+                            f"**🏠 {local} (últ. {nh} casa)**\n"
+                            f"- Prom. Goles: **{gfh:.2f}** favor / **{gch:.2f}** contra\n"
+                            f"- BTTS: **{bttsh:.0f}%** | +2.5 Goles: **{ovh:.0f}%**"
+                        )
+                        dm2.markdown(
+                            f"**✈️ {visitante} (últ. {na} fuera)**\n"
+                            f"- Prom. Goles: **{gfa:.2f}** favor / **{gca:.2f}** contra\n"
+                            f"- BTTS: **{bttsa:.0f}%** | +2.5 Goles: **{ova:.0f}%**"
+                        )
 
                 # Sincronización opcional con The Odds API
                 momios_liga, creditos_rest = cargar_momios_mercado(LIGAS[liga_sel])
@@ -586,7 +651,7 @@ with tab1:
 
                 if momio_mkt:
                     info_cred = f" • Créditos API: **{creditos_rest}/500**" if creditos_rest else ""
-                    st.caption(f"📡 Momios sincronizados (Ref: **{momio_mkt.get('casa', 'EU')}**). Ajusta si Playdoit/Draftea varía{info_cred}")
+                    st.caption(f"📡 Momios sincronizados (Ref: **{momio_mkt.get('casa', 'EU')}**){info_cred}")
 
                 mapa_clave_mkt = {
                     f"Gana {local} (1)": momio_mkt.get("1", 0.0),
@@ -605,7 +670,6 @@ with tab1:
                 ]
                 max_p = max(p for _, p in mercados)
 
-                # Verificar si ya existe un pick pendiente de este mismo partido
                 ya_tiene_pick = False
                 if not df_hist_global.empty:
                     ya_tiene_pick = not df_hist_global[
@@ -630,11 +694,11 @@ with tab1:
                             min_value=1.01,
                             value=float(val_inicial),
                             step=0.05,
-                            key=f"c_{local}_{visitante}_{nombre}_{k_bayes}_{ultimos_n}",
+                            key=f"c_{local}_{visitante}_{nombre}_{ventana_opcion}_{k_bayes}",
                             label_visibility="collapsed"
                         )
 
-                        if cm5.button("➕ Parlay", key=f"pa_{local}_{visitante}_{nombre}", use_container_width=True):
+                        if cm5.button("➕ Parlay", key=f"pa_{local}_{visitante}_{nombre}_{ventana_opcion}", use_container_width=True):
                             st.session_state.parlay_items = [
                                 x for x in st.session_state.parlay_items if x["partido"] != partido_str
                             ]
@@ -667,7 +731,7 @@ with tab1:
                                 f"✅ **VALUE BET (+{ev:.1f}% EV)** | Stake: **{stake_fin:.2f}** ({pct_k}% Bank)"
                                 if fraccion_kelly > 0 else f"✅ **VALUE BET (+{ev:.1f}% EV)** | Stake: **1.00 u**"
                             )
-                            if cb.button("💾 Guardar", key=f"sv_{local}_{visitante}_{nombre}", use_container_width=True):
+                            if cb.button("💾 Guardar", key=f"sv_{local}_{visitante}_{nombre}_{ventana_opcion}", use_container_width=True):
                                 guardar_pick(liga_sel, partido_str, nombre, prob, cuota, ev, stake_fin)
                                 st.toast("Pick guardado en Supabase", icon="✅")
                                 st.rerun()
