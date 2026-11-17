@@ -110,9 +110,14 @@ def init_db():
                 cuota_casa DOUBLE PRECISION,
                 valor_ev DOUBLE PRECISION,
                 stake DOUBLE PRECISION,
-                estado TEXT DEFAULT 'Pendiente'
+                estado TEXT DEFAULT 'Pendiente',
+                condicion_jugador TEXT DEFAULT ''
             )
         """)
+        try:
+            cur.execute("ALTER TABLE historial_picks ADD COLUMN IF NOT EXISTS condicion_jugador TEXT DEFAULT ''")
+        except Exception:
+            conn.rollback()
     else:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS historial_picks (
@@ -125,23 +130,28 @@ def init_db():
                 cuota_casa REAL,
                 valor_ev REAL,
                 stake REAL,
-                estado TEXT DEFAULT 'Pendiente'
+                estado TEXT DEFAULT 'Pendiente',
+                condicion_jugador TEXT DEFAULT ''
             )
         """)
+        try:
+            cur.execute("ALTER TABLE historial_picks ADD COLUMN IF NOT EXISTS condicion_jugador TEXT DEFAULT ''")
+        except Exception:
+            pass
     conn.commit()
     cur.close()
     conn.close()
 
-def guardar_pick(liga, partido, mercado, prob, cuota, ev, stake):
+def guardar_pick(liga, partido, mercado, prob, cuota, ev, stake, condicion_jugador=""):
     conn, tipo = get_db_conn()
     cur = conn.cursor()
     fecha_actual = datetime.now(ZONA_HORARIA).strftime("%Y-%m-%d %H:%M")
     ph = "%s" if tipo == "pg" else "?"
     cur.execute(
         f"""INSERT INTO historial_picks 
-        (fecha, liga, partido, mercado, prob_modelo, cuota_casa, valor_ev, stake) 
-        VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})""",
-        (fecha_actual, liga, partido, mercado, float(prob), float(cuota), float(ev), float(stake))
+        (fecha, liga, partido, mercado, prob_modelo, cuota_casa, valor_ev, stake, condicion_jugador) 
+        VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})""",
+        (fecha_actual, liga, partido, mercado, float(prob), float(cuota), float(ev), float(stake), condicion_jugador.strip())
     )
     conn.commit()
     cur.close()
@@ -151,6 +161,9 @@ def cargar_historial():
     conn, _ = get_db_conn()
     df = pd.read_sql_query("SELECT * FROM historial_picks ORDER BY id DESC", conn)
     conn.close()
+    if "condicion_jugador" not in df.columns:
+        df["condicion_jugador"] = ""
+    df["condicion_jugador"] = df["condicion_jugador"].fillna("")
     return df
 
 def actualizar_estado_pick(pick_id, nuevo_estado):
@@ -318,8 +331,9 @@ def obtener_plantilla_equipo(team_id):
     return pd.DataFrame()
 
 @st.cache_data(ttl=1800)
-def obtener_noticias_partido(local, visitante):
-    query = f"{local} {visitante} lineup OR injury OR lesionados OR alineacion".replace(" ", "+")
+def obtener_noticias_partido(local, visitante, jugador_extra=""):
+    extra = f" {jugador_extra}" if jugador_extra else ""
+    query = f"{local} {visitante}{extra} lineup OR injury OR lesionados OR alineacion".replace(" ", "+")
     url = f"https://news.google.com/rss/search?q={query}&hl=es-419&gl=MX&ceid=MX:es-419"
     try:
         feed = feedparser.parse(url)
@@ -328,9 +342,55 @@ def obtener_noticias_partido(local, visitante):
         return []
 
 # ==========================================
-# 5. MOTOR MATEMÁTICO (BAYES-DIXON-COLES + KELLY)
+# 5. RESUMEN VISUAL DE ÚLTIMOS 5 PARTIDOS (G / E / P)
 # ==========================================
-def calcular_probabilidades_partido(df, local, visitante, k_bayes=3.0, ventana_opcion="Toda la temporada"):
+def obtener_resumen_ultimos_5(df, equipo, solo_condicion=None):
+    if solo_condicion == "Local":
+        sub = df[df["Local"] == equipo].tail(5)
+    elif solo_condicion == "Visitante":
+        sub = df[df["Visitante"] == equipo].tail(5)
+    else:
+        sub = df[(df["Local"] == equipo) | (df["Visitante"] == equipo)].tail(5)
+
+    g, e, p = 0, 0, 0
+    badges = []
+    detalle_partidos = []
+
+    for _, row in sub.iterrows():
+        es_local = row["Local"] == equipo
+        gf = row["GolesLocal"] if es_local else row["GolesVisitante"]
+        gc = row["GolesVisitante"] if es_local else row["GolesLocal"]
+        rival = row["Visitante"] if es_local else row["Local"]
+        cond_tag = "L" if es_local else "V"
+
+        if gf > gc:
+            g += 1
+            badges.append("🟢 **G**")
+            icono = "🟢"
+        elif gf == gc:
+            e += 1
+            badges.append("🟡 **E**")
+            icono = "🟡"
+        else:
+            p += 1
+            badges.append("🔴 **P**")
+            icono = "🔴"
+
+        detalle_partidos.append(f"{icono} `{gf}-{gc}` vs {rival} ({cond_tag})")
+
+    return {
+        "G": g,
+        "E": e,
+        "P": p,
+        "total": len(sub),
+        "racha_str": "  ".join(badges) if badges else "Sin datos",
+        "detalles": detalle_partidos
+    }
+
+# ==========================================
+# 6. MOTOR MATEMÁTICO (BAYES-DIXON-COLES + KELLY)
+# ==========================================
+def calcular_probabilidades_partido(df, local, visitante, k_bayes=3.0, ventana_opcion="Toda la temporada", factor_baja_h=1.0, factor_baja_a=1.0):
     if df.empty:
         return None
 
@@ -349,19 +409,12 @@ def calcular_probabilidades_partido(df, local, visitante, k_bayes=3.0, ventana_o
         media_suavizada = (goles_serie.sum() + k * media_liga) / (n + k)
         return media_suavizada / media_liga
 
-    # Ajuste dinámico según la ventana elegida (3, 5 o Toda la temporada)
     if ventana_opcion == "Últimos 3":
-        n_rec = 3
-        peso_rec = 0.70
-        k_ef = max(1.0, k_bayes * 0.6)
+        n_rec, peso_rec, k_ef = 3, 0.70, max(1.0, k_bayes * 0.6)
     elif ventana_opcion == "Últimos 5":
-        n_rec = 5
-        peso_rec = 0.55
-        k_ef = max(1.5, k_bayes * 0.8)
+        n_rec, peso_rec, k_ef = 5, 0.55, max(1.5, k_bayes * 0.8)
     else:
-        n_rec = 10
-        peso_rec = 0.30
-        k_ef = k_bayes
+        n_rec, peso_rec, k_ef = 10, 0.30, k_bayes
 
     peso_temp = 1.0 - peso_rec
     h_rec = h_all.tail(n_rec)
@@ -377,8 +430,8 @@ def calcular_probabilidades_partido(df, local, visitante, k_bayes=3.0, ventana_o
     def_a = peso_temp * fuerza_bayesiana(a_all["GolesLocal"], avg_home_gf, k_ef) + \
             peso_rec * fuerza_bayesiana(a_rec["GolesLocal"], avg_home_gf, k_ef)
 
-    lambda_h = max(0.15, att_h * def_a * avg_home_gf)
-    lambda_a = max(0.15, att_a * def_h * avg_away_gf)
+    lambda_h = max(0.15, att_h * def_a * avg_home_gf * factor_baja_h)
+    lambda_a = max(0.15, att_a * def_h * avg_away_gf * factor_baja_a)
 
     goles = np.arange(10)
     p_h = poisson.pmf(goles, lambda_h)
@@ -483,7 +536,7 @@ def cargar_partido_callback(eq_local, eq_vis):
     st.session_state["sel_vis"] = eq_vis
 
 # ==========================================
-# 6. ESTADO DE SESIÓN Y SIDEBAR (BANKROLL)
+# 7. ESTADO DE SESIÓN Y SIDEBAR (BANKROLL)
 # ==========================================
 if "parlay_items" not in st.session_state:
     st.session_state.parlay_items = []
@@ -517,7 +570,7 @@ with st.sidebar:
     k_bayes = st.slider("Suavizado Bayesiano (K)", 1.0, 6.0, 3.0, 0.5)
 
 # ==========================================
-# 7. ENCABEZADO Y REVISIÓN RÁPIDA MÓVIL (IPHONE)
+# 8. ENCABEZADO Y REVISIÓN RÁPIDA MÓVIL (IPHONE)
 # ==========================================
 st.title("⚽ BetAnalytics Pro")
 
@@ -527,29 +580,44 @@ if not df_hist_global.empty:
         exposicion_actual = pendientes_df["stake"].sum()
         pct_exp = (exposicion_actual / bankroll_total * 100) if bankroll_total > 0 else 0
         with st.expander(f"⚡ Revisión Rápida Pre-Partido ({len(pendientes_df)} abiertos • {pct_exp:.1f}% Bank en juego)", expanded=False):
-            st.caption("Verifica aquí el momio de Playdoit/Draftea cuando salgan alineaciones:")
+            st.caption("Cuando salgan alineaciones oficiales, verifica jugador clave + momio actual:")
             for _, p_row in pendientes_df.iterrows():
                 justa_p = round(100 / p_row["prob_modelo"], 2) if p_row["prob_modelo"] > 0 else 99.0
-                c1, c2, c3 = st.columns([3.2, 1.8, 2.2], vertical_alignment="center")
-                c1.markdown(f"**{p_row['partido']}**\n\n{p_row['mercado']} • Justa: **{justa_p}** | Stake: **{p_row['stake']}**")
-                nuevo_m = c2.number_input(
-                    "Momio",
-                    min_value=1.01,
-                    value=float(p_row["cuota_casa"]),
-                    step=0.05,
-                    key=f"chk_live_{p_row['id']}",
-                    label_visibility="collapsed"
-                )
-                ev_live = ((nuevo_m * (p_row["prob_modelo"] / 100.0)) - 1.0) * 100.0
-                if ev_live >= min_ev:
-                    c3.success(f"✅ ENTRAR (+{ev_live:.1f}% EV)")
-                elif ev_live > 0:
-                    c3.warning(f"⚠️ BAJO (+{ev_live:.1f}% EV)")
-                else:
-                    c3.error(f"🚫 NO ENTRAR ({ev_live:.1f}% EV)")
+                cond_txt = p_row.get("condicion_jugador", "")
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([3.2, 1.8, 2.2], vertical_alignment="center")
+                    info_cond = f"\n\n🎯 **Condición:** `{cond_txt}`" if cond_txt else ""
+                    c1.markdown(f"**{p_row['partido']}**\n\n{p_row['mercado']} • Justa: **{justa_p}** | Stake: **{p_row['stake']}**{info_cond}")
+
+                    nuevo_m = c2.number_input(
+                        "Momio",
+                        min_value=1.01,
+                        value=float(p_row["cuota_casa"]),
+                        step=0.05,
+                        key=f"chk_live_{p_row['id']}",
+                        label_visibility="collapsed"
+                    )
+
+                    jugador_ok = True
+                    if cond_txt:
+                        jugador_ok = st.checkbox(
+                            f"Confirmado en XI titular: {cond_txt}",
+                            value=True,
+                            key=f"jug_ok_{p_row['id']}"
+                        )
+
+                    ev_live = ((nuevo_m * (p_row["prob_modelo"] / 100.0)) - 1.0) * 100.0
+                    if not jugador_ok:
+                        c3.error(f"🛑 NO METER\n\nFalta: {cond_txt}")
+                    elif ev_live >= min_ev:
+                        c3.success(f"✅ ENTRAR (+{ev_live:.1f}% EV)")
+                    elif ev_live > 0:
+                        c3.warning(f"⚠️ BAJO (+{ev_live:.1f}% EV)")
+                    else:
+                        c3.error(f"🚫 NO ENTRAR ({ev_live:.1f}% EV)")
 
 # ==========================================
-# 8. SELECTOR DE LIGA Y PESTAÑAS PRINCIPALES
+# 9. SELECTOR DE LIGA Y PESTAÑAS PRINCIPALES
 # ==========================================
 liga_sel = st.selectbox("🏆 Competición", list(LIGAS.keys()))
 df_jugados, df_proximos, escudos, df_tabla = obtener_datos_liga(LIGAS[liga_sel])
@@ -568,7 +636,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 ])
 
 # ------------------------------------------
-# TAB 1: ANÁLISIS, VARIANZA Y DATOS DESTACADOS
+# TAB 1: ANÁLISIS, FORMA 5 PARTIDOS, VARIANZA Y DATOS DESTACADOS
 # ------------------------------------------
 with tab1:
     if df_jugados.empty:
@@ -584,7 +652,6 @@ with tab1:
         local = csel1.selectbox("🏠 Local", equipos, key="sel_local")
         visitante = csel2.selectbox("✈️ Visitante", equipos, key="sel_vis")
 
-        # Botón / Selector rápido de Varianza y Muestra (3, 5, Toda la temporada)
         ventana_opcion = st.radio(
             "📐 Muestra / Ajuste de Varianza:",
             options=["Últimos 3", "Últimos 5", "Toda la temporada"],
@@ -592,14 +659,40 @@ with tab1:
             horizontal=True
         )
 
+        # MÓDULO DE CONTROL DE ALINEACIÓN Y BAJAS CLAVE
+        with st.expander("🩺 Regla de Alineación / Jugador Clave (Evitar o Ajustar)", expanded=False):
+            st.caption("Define si este pick queda condicionado a que juegue una estrella o si ya es baja confirmada:")
+            ca1, ca2 = st.columns(2)
+            jugador_condicion = ca1.text_input(
+                "No apostar si falta (Ej: Saka, Haaland, Rodri):",
+                placeholder="Nombre del jugador clave...",
+                key=f"cond_jug_{local}_{visitante}"
+            )
+            estado_jugador = ca2.selectbox(
+                "Estado actual en alineación:",
+                options=[
+                    "⏳ Por confirmar (Guardar regla para pre-partido)",
+                    "✅ Confirmado titular",
+                    "❌ Baja confirmada Local (-15% ataque)",
+                    "❌ Baja confirmada Visitante (-15% ataque)",
+                    "🛑 Baja estrella indispensable (BLOQUEAR PICK)"
+                ],
+                key=f"est_jug_{local}_{visitante}"
+            )
+
+        factor_baja_h = 0.85 if "Baja confirmada Local" in estado_jugador else 1.0
+        factor_baja_a = 0.85 if "Baja confirmada Visitante" in estado_jugador else 1.0
+        bloqueo_por_baja = "BLOQUEAR PICK" in estado_jugador
+
         if local == visitante:
             st.warning("Selecciona dos equipos distintos.")
         else:
-            res = calcular_probabilidades_partido(df_jugados, local, visitante, k_bayes, ventana_opcion)
+            res = calcular_probabilidades_partido(
+                df_jugados, local, visitante, k_bayes, ventana_opcion, factor_baja_h, factor_baja_a
+            )
             if res:
                 partido_str = f"{local} vs {visitante}"
 
-                # Cabecera visual de equipos y xG estimado
                 ch1, ch2, ch3 = st.columns([2, 1, 2], vertical_alignment="center")
                 with ch1:
                     if escudos.get(local):
@@ -619,7 +712,33 @@ with tab1:
                     " • ".join([f"**{m}** ({p:.1f}%)" for m, p in res["top_marcadores"]])
                 )
 
-                # BLOQUE DE DATOS DESTACADOS Y MÉTRICAS COMPARATIVAS
+                # ========================================================
+                # BLOQUE VISUAL: RESUMEN DE ÚLTIMOS 5 PARTIDOS (G / E / P)
+                # ========================================================
+                f5_h_gen = obtener_resumen_ultimos_5(df_jugados, local)
+                f5_a_gen = obtener_resumen_ultimos_5(df_jugados, visitante)
+                f5_h_loc = obtener_resumen_ultimos_5(df_jugados, local, solo_condicion="Local")
+                f5_a_vis = obtener_resumen_ultimos_5(df_jugados, visitante, solo_condicion="Visitante")
+
+                with st.container(border=True):
+                    st.markdown("#### 📊 Forma Reciente (Últimos 5 Partidos)")
+                    cf1, cf2 = st.columns(2)
+                    with cf1:
+                        st.markdown(f"**🏠 {local}**")
+                        st.markdown(f"General: {f5_h_gen['racha_str']}  (`{f5_h_gen['G']}G - {f5_h_gen['E']}E - {f5_h_gen['P']}P`)")
+                        st.markdown(f"En Casa: {f5_h_loc['racha_str']}  (`{f5_h_loc['G']}G - {f5_h_loc['E']}E - {f5_h_loc['P']}P`)")
+                        with st.expander("Ver marcadores últimos 5"):
+                            for d_p in f5_h_gen["detalles"]:
+                                st.markdown(d_p)
+                    with cf2:
+                        st.markdown(f"**✈️ {visitante}**")
+                        st.markdown(f"General: {f5_a_gen['racha_str']}  (`{f5_a_gen['G']}G - {f5_a_gen['E']}E - {f5_a_gen['P']}P`)")
+                        st.markdown(f"De Visita: {f5_a_vis['racha_str']}  (`{f5_a_vis['G']}G - {f5_a_vis['E']}E - {f5_a_vis['P']}P`)")
+                        with st.expander("Ver marcadores últimos 5"):
+                            for d_p in f5_a_gen["detalles"]:
+                                st.markdown(d_p)
+
+                # BLOQUE DE DATOS DESTACADOS Y TENDENCIAS
                 destacados, metricas = obtener_datos_destacados(df_jugados, local, visitante, ventana_opcion)
                 with st.expander(f"💡 Datos Destacados y Tendencias ({ventana_opcion})", expanded=True):
                     for d_txt in destacados:
@@ -641,7 +760,6 @@ with tab1:
                             f"- BTTS: **{bttsa:.0f}%** | +2.5 Goles: **{ova:.0f}%**"
                         )
 
-                # Sincronización opcional con The Odds API
                 momios_liga, creditos_rest = cargar_momios_mercado(LIGAS[liga_sel])
                 momio_mkt = {}
                 for k_ev, val_ev in momios_liga.items():
@@ -694,27 +812,32 @@ with tab1:
                             min_value=1.01,
                             value=float(val_inicial),
                             step=0.05,
-                            key=f"c_{local}_{visitante}_{nombre}_{ventana_opcion}_{k_bayes}",
+                            key=f"c_{local}_{visitante}_{nombre}_{ventana_opcion}_{k_bayes}_{factor_baja_h}_{factor_baja_a}",
                             label_visibility="collapsed"
                         )
 
                         if cm5.button("➕ Parlay", key=f"pa_{local}_{visitante}_{nombre}_{ventana_opcion}", use_container_width=True):
-                            st.session_state.parlay_items = [
-                                x for x in st.session_state.parlay_items if x["partido"] != partido_str
-                            ]
-                            st.session_state.parlay_items.append({
-                                "liga": liga_sel,
-                                "partido": partido_str,
-                                "mercado": nombre,
-                                "prob": prob,
-                                "cuota_justa": justa,
-                                "cuota_casa": cuota
-                            })
-                            st.toast(f"Añadido al Parlay: {partido_str}", icon="🎰")
-                            st.rerun()
+                            if bloqueo_por_baja:
+                                st.error(f"🛑 Pick bloqueado por ausencia de {jugador_condicion or 'jugador clave'}.")
+                            else:
+                                st.session_state.parlay_items = [
+                                    x for x in st.session_state.parlay_items if x["partido"] != partido_str
+                                ]
+                                st.session_state.parlay_items.append({
+                                    "liga": liga_sel,
+                                    "partido": partido_str,
+                                    "mercado": nombre,
+                                    "prob": prob,
+                                    "cuota_justa": justa,
+                                    "cuota_casa": cuota
+                                })
+                                st.toast(f"Añadido al Parlay: {partido_str}", icon="🎰")
+                                st.rerun()
 
                         ev = ((cuota * (prob / 100.0)) - 1.0) * 100.0
-                        if ev >= min_ev:
+                        if bloqueo_por_baja and ev >= min_ev:
+                            st.error(f"🛑 **NO APOSTAR (Regla de Alineación):** Baja confirmada de **{jugador_condicion or 'jugador clave'}**. Aunque marca +{ev:.1f}% EV, se evita por riesgo de alineación.")
+                        elif ev >= min_ev:
                             pct_k, stake_sug = (
                                 calcular_stake_kelly(prob, cuota, bankroll_total, fraccion_kelly, max_riesgo_pct)
                                 if fraccion_kelly > 0 else (0.0, 1.0)
@@ -725,6 +848,8 @@ with tab1:
                                 st.warning(f"⚠️ Momio bajo (**{cuota}** < 1.50). Alta exigencia de acierto para sencillas.")
                             if ya_tiene_pick:
                                 st.warning(f"⚠️ Ya tienes un pick pendiente en **{partido_str}**. Evita sobreexponer el mismo partido.")
+                            if jugador_condicion.strip():
+                                st.info(f"🎯 **Condición activa:** Solo entrar si juega **{jugador_condicion.strip()}**.")
 
                             ca, cb = st.columns([4, 1.4], vertical_alignment="center")
                             ca.success(
@@ -732,7 +857,7 @@ with tab1:
                                 if fraccion_kelly > 0 else f"✅ **VALUE BET (+{ev:.1f}% EV)** | Stake: **1.00 u**"
                             )
                             if cb.button("💾 Guardar", key=f"sv_{local}_{visitante}_{nombre}_{ventana_opcion}", use_container_width=True):
-                                guardar_pick(liga_sel, partido_str, nombre, prob, cuota, ev, stake_fin)
+                                guardar_pick(liga_sel, partido_str, nombre, prob, cuota, ev, stake_fin, jugador_condicion)
                                 st.toast("Pick guardado en Supabase", icon="✅")
                                 st.rerun()
                         elif ev <= -10.0:
@@ -815,8 +940,9 @@ with tab4:
     v_not = st.session_state.get("sel_vis", "")
     if l_not and v_not:
         st.caption(f"Mostrando reportes recientes para **{l_not} vs {v_not}**")
+        jug_buscar = st.text_input("Filtrar por jugador específico (opcional):", placeholder="Ej: Bellingham, Vinicius...", key="filtro_not_jug")
         if st.button("🔍 Buscar noticias y alineaciones ahora", use_container_width=True):
-            noticias = obtener_noticias_partido(l_not, v_not)
+            noticias = obtener_noticias_partido(l_not, v_not, jug_buscar)
             if not noticias:
                 st.info("No se encontraron titulares recientes. Intenta más cerca de la hora del partido.")
             for n in noticias:
@@ -862,7 +988,8 @@ with tab6:
         for _, r in df_h.iterrows():
             with st.container(border=True):
                 ch_a, ch_b, ch_c, ch_d = st.columns([3.5, 3, 2, 0.8], vertical_alignment="center")
-                ch_a.markdown(f"**{r['partido']}** ({r['liga']})\n\n{r['fecha']}")
+                cond_h = f" • 🎯 Si juega: **{r['condicion_jugador']}**" if r.get("condicion_jugador") else ""
+                ch_a.markdown(f"**{r['partido']}** ({r['liga']})\n\n{r['fecha']}{cond_h}")
                 ch_b.markdown(f"**{r['mercado']}**\n\nMomio: **{r['cuota_casa']}** | EV: **{r['valor_ev']:.1f}%** | Stake: **{r['stake']}**")
                 opciones_est = ["Pendiente", "Ganada", "Perdida", "Nula"]
                 idx_est = opciones_est.index(r["estado"]) if r["estado"] in opciones_est else 0
