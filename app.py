@@ -197,10 +197,21 @@ def obtener_datos_liga(codigo_liga):
     for m in matches_json:
         home = m["homeTeam"].get("shortName") or m["homeTeam"].get("name")
         away = m["awayTeam"].get("shortName") or m["awayTeam"].get("name")
-        escudos[home] = m["homeTeam"].get("crest", "")
-        escudos[away] = m["awayTeam"].get("crest", "")
-        escudos[f"{home}_id"] = m["homeTeam"].get("id")
-        escudos[f"{away}_id"] = m["awayTeam"].get("id")
+        h_id = m["homeTeam"].get("id")
+        a_id = m["awayTeam"].get("id")
+
+        if m["homeTeam"].get("crest"):
+            escudos[home] = m["homeTeam"]["crest"]
+        elif h_id:
+            escudos[home] = f"https://crests.football-data.org/{h_id}.png"
+
+        if m["awayTeam"].get("crest"):
+            escudos[away] = m["awayTeam"]["crest"]
+        elif a_id:
+            escudos[away] = f"https://crests.football-data.org/{a_id}.png"
+
+        escudos[f"{home}_id"] = h_id
+        escudos[f"{away}_id"] = a_id
 
         utc_dt = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
         local_dt = utc_dt.astimezone(ZONA_HORARIA)
@@ -238,8 +249,13 @@ def obtener_datos_liga(codigo_liga):
                 if st_blk.get("type") == "TOTAL":
                     for row in st_blk.get("table", []):
                         t_name = row["team"].get("shortName") or row["team"].get("name")
+                        t_id = row["team"].get("id")
+                        crest_url = row["team"].get("crest") or (f"https://crests.football-data.org/{t_id}.png" if t_id else "")
+                        if crest_url:
+                            escudos[t_name] = crest_url
                         filas.append({
                             "Pos": row["position"],
+                            "Escudo": crest_url,
                             "Equipo": t_name,
                             "PJ": row["playedGames"],
                             "G": row["won"],
@@ -534,9 +550,6 @@ def cargar_partido_callback(eq_local, eq_vis):
 # ==========================================
 # 7. ESTADO DE SESIÓN Y SIDEBAR (BANKROLL)
 # ==========================================
-if "parlay_items" not in st.session_state:
-    st.session_state.parlay_items = []
-
 df_hist_global = cargar_historial()
 beneficio_hist = 0.0
 if not df_hist_global.empty:
@@ -579,15 +592,15 @@ if isinstance(df_tabla, str):
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🎯 Análisis",
+    "🏆 Tabla",
     "📅 Próximos",
-    "🎰 Parlays",
     "📰 Noticias",
     "👟 Plantillas",
     "📈 Historial"
 ])
 
 # ------------------------------------------
-# TAB 1: ANÁLISIS, POSICIÓN EN TABLA, FORMA 5 Y DATOS DESTACADOS
+# TAB 1: ANÁLISIS, ESCUDOS, POSICIÓN EN TABLA Y FORMA 5
 # ------------------------------------------
 with tab1:
     if df_jugados.empty:
@@ -624,7 +637,10 @@ with tab1:
                 ch1, ch2, ch3 = st.columns([2, 1, 2], vertical_alignment="center")
                 with ch1:
                     if escudos.get(local):
-                        st.image(escudos[local], width=48)
+                        st.markdown(
+                            f"<img src='{escudos[local]}' width='54' style='margin-bottom:6px; object-fit:contain;'>",
+                            unsafe_allow_html=True
+                        )
                     st.markdown(f"### {local}")
                     st.markdown(info_tabla_h)
                     st.caption(f"Goles esperados (xG): **{res['lambda_h']:.2f}**")
@@ -632,7 +648,10 @@ with tab1:
                     st.markdown("<h3 style='text-align:center;'>VS</h3>", unsafe_allow_html=True)
                 with ch3:
                     if escudos.get(visitante):
-                        st.image(escudos[visitante], width=48)
+                        st.markdown(
+                            f"<img src='{escudos[visitante]}' width='54' style='margin-bottom:6px; object-fit:contain;'>",
+                            unsafe_allow_html=True
+                        )
                     st.markdown(f"### {visitante}")
                     st.markdown(info_tabla_a)
                     st.caption(f"Goles esperados (xG): **{res['lambda_a']:.2f}**")
@@ -733,7 +752,7 @@ with tab1:
                         val_inicial = justa
 
                     with st.container(border=True):
-                        cm1, cm2, cm3, cm4, cm5 = st.columns([3.2, 1.6, 1.6, 2.0, 1.6], vertical_alignment="center")
+                        cm1, cm2, cm3, cm4 = st.columns([3.5, 1.8, 1.8, 2.2], vertical_alignment="center")
                         cm1.markdown(f"**{nombre}** {'🔥' if prob == max_p else ''}")
                         cm2.markdown(f"Prob: **{prob:.1f}%**")
                         cm3.markdown(f"Justa: **{justa}**")
@@ -745,21 +764,6 @@ with tab1:
                             key=f"c_{local}_{visitante}_{nombre}_{ventana_opcion}_{k_bayes}",
                             label_visibility="collapsed"
                         )
-
-                        if cm5.button("➕ Parlay", key=f"pa_{local}_{visitante}_{nombre}_{ventana_opcion}", use_container_width=True):
-                            st.session_state.parlay_items = [
-                                x for x in st.session_state.parlay_items if x["partido"] != partido_str
-                            ]
-                            st.session_state.parlay_items.append({
-                                "liga": liga_sel,
-                                "partido": partido_str,
-                                "mercado": nombre,
-                                "prob": prob,
-                                "cuota_justa": justa,
-                                "cuota_casa": cuota
-                            })
-                            st.toast(f"Añadido al Parlay: {partido_str}", icon="🎰")
-                            st.rerun()
 
                         ev = ((cuota * (prob / 100.0)) - 1.0) * 100.0
                         if ev >= min_ev:
@@ -787,9 +791,29 @@ with tab1:
                             st.error(f"🚫 **OVERBET / LÍNEA CASTIGADA ({ev:.1f}% EV):** La casa paga muy por debajo del riesgo real (Justa: {justa} vs Casa: {cuota}).")
 
 # ------------------------------------------
-# TAB 2: PRÓXIMOS PARTIDOS
+# TAB 2: TABLA GLOBAL DE POSICIONES
 # ------------------------------------------
 with tab2:
+    st.subheader(f"🏆 Clasificación General — {liga_sel}")
+    if not isinstance(df_tabla, pd.DataFrame) or df_tabla.empty:
+        st.info("Tabla de posiciones no disponible para esta competición.")
+    else:
+        st.dataframe(
+            df_tabla,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Pos": st.column_config.NumberColumn("Pos", width="small"),
+                "Escudo": st.column_config.ImageColumn("", width="small"),
+                "Equipo": st.column_config.TextColumn("Equipo", width="medium"),
+                "Pts": st.column_config.NumberColumn("Pts", width="small"),
+            }
+        )
+
+# ------------------------------------------
+# TAB 3: PRÓXIMOS PARTIDOS
+# ------------------------------------------
+with tab3:
     if df_proximos.empty:
         st.info("No hay próximos partidos programados en esta liga.")
     else:
@@ -809,50 +833,6 @@ with tab2:
                         use_container_width=True
                     ):
                         st.toast(f"Cargado: {row['Local']} vs {row['Visitante']}", icon="⚽")
-
-# ------------------------------------------
-# TAB 3: CONSTRUCTOR DE PARLAYS
-# ------------------------------------------
-with tab3:
-    st.subheader("🎰 Constructor de Parlays (+EV)")
-    items = st.session_state.parlay_items
-    if not items:
-        st.info("Añade selecciones desde la pestaña **🎯 Análisis** usando el botón **➕ Parlay**.")
-    else:
-        prob_comb = 1.0
-        cuota_comb = 1.0
-        for i, it in enumerate(items):
-            prob_comb *= (it["prob"] / 100.0)
-            cuota_comb *= it["cuota_casa"]
-            with st.container(border=True):
-                cp1, cp2, cp3 = st.columns([4, 2, 1], vertical_alignment="center")
-                cp1.markdown(f"**{it['partido']}**\n\n{it['mercado']}")
-                cp2.markdown(f"Prob: **{it['prob']:.1f}%** | Momio: **{it['cuota_casa']}**")
-                if cp3.button("🗑️", key=f"del_p_{i}", use_container_width=True):
-                    st.session_state.parlay_items.pop(i)
-                    st.rerun()
-
-        prob_comb_pct = prob_comb * 100.0
-        ev_parlay = ((cuota_comb * prob_comb) - 1.0) * 100.0
-        tope_parlay = 1.5 if len(items) >= 3 else 2.0
-        pct_kp, stake_p = calcular_stake_kelly(prob_comb_pct, cuota_comb, bankroll_total, 0.25, tope_parlay)
-
-        st.divider()
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Momio Combinado", f"{cuota_comb:.2f}")
-        m2.metric("Prob. Conjunta", f"{prob_comb_pct:.1f}%")
-        m3.metric("EV Parlay", f"{ev_parlay:+.1f}%")
-
-        if ev_parlay >= min_ev:
-            st.success(f"✅ **Parlay con Valor (+{ev_parlay:.1f}% EV)** | Stake sugerido: **{max(stake_p, 1.0):.2f}** ({pct_kp}% Bank)")
-            if st.button("💾 Guardar Parlay en Historial", use_container_width=True):
-                desc = " + ".join([f"{x['partido']} ({x['mercado']})" for x in items])
-                guardar_pick("Parlay Multi-Liga", desc, f"Parlay {len(items)} sel.", prob_comb_pct, round(cuota_comb, 2), ev_parlay, max(stake_p, 1.0))
-                st.session_state.parlay_items = []
-                st.toast("Parlay guardado en Supabase", icon="🎰")
-                st.rerun()
-        else:
-            st.warning("⚠️ Este parlay no alcanza el filtro mínimo de EV. Revisa las cuotas.")
 
 # ------------------------------------------
 # TAB 4: NOTICIAS Y ALINEACIONES
