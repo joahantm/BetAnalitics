@@ -279,7 +279,7 @@ def obtener_info_tabla_equipo(df_tabla, equipo):
         if not fila.empty:
             r = fila.iloc[0]
             dg_str = f"+{r['DG']}" if r["DG"] > 0 else str(r["DG"])
-            return f"🏆 Posición: **#{r['Pos']}** • **{r['Pts']} pts** (PJ: {r['PJ']} | DG: {dg_str})"
+            return f"🏆 Posición: <strong>#{r['Pos']}</strong> • <strong>{r['Pts']} pts</strong> (PJ: {r['PJ']} | DG: {dg_str})"
     return "🏆 Posición en tabla no disponible"
 
 @st.cache_data(ttl=1800)
@@ -367,15 +367,11 @@ def obtener_resumen_ultimos_5(df, equipo, escudos, solo_condicion=None):
     g, e, p = 0, 0, 0
     badges = []
     detalle_partidos = []
-    escudo_eq = escudos.get(equipo, "")
 
     for _, row in sub.iterrows():
         es_local = row["Local"] == equipo
         gf = row["GolesLocal"] if es_local else row["GolesVisitante"]
         gc = row["GolesVisitante"] if es_local else row["GolesLocal"]
-        rival = row["Visitante"] if es_local else row["Local"]
-        escudo_rival = escudos.get(rival, "")
-        cond_badge = "🏠 L" if es_local else "✈️ V"
 
         if gf > gc:
             g += 1
@@ -390,31 +386,31 @@ def obtener_resumen_ultimos_5(df, equipo, escudos, solo_condicion=None):
             badges.append("🔴 **P**")
             icono = "🔴"
 
-        img_eq_html = (
-            f"<img src='{escudo_eq}' width='20' height='20' "
-            f"style='object-fit:contain; flex-shrink:0;'>"
-            if escudo_eq else ""
-        )
-        img_riv_html = (
-            f"<img src='{escudo_rival}' width='20' height='20' "
-            f"style='object-fit:contain; flex-shrink:0;'>"
-            if escudo_rival else ""
-        )
+        eq_izq = row["Local"]
+        eq_der = row["Visitante"]
+        g_izq = row["GolesLocal"]
+        g_der = row["GolesVisitante"]
 
-        # Fila alineada: [Estado] [Escudo Equipo] Equipo GF - GC [Escudo Rival] Rival [Local/Visita]
+        esc_izq = escudos.get(eq_izq, "")
+        esc_der = escudos.get(eq_der, "")
+
+        img_izq = f"<img src='{esc_izq}' width='20' height='20' style='object-fit:contain; flex-shrink:0;'>" if esc_izq else ""
+        img_der = f"<img src='{esc_der}' width='20' height='20' style='object-fit:contain; flex-shrink:0;'>" if esc_der else ""
+
+        nombre_izq = f"<strong>{eq_izq}</strong>" if eq_izq == equipo else eq_izq
+        nombre_der = f"<strong>{eq_der}</strong>" if eq_der == equipo else eq_der
+
+        # Siempre Local a la izquierda y Visitante a la derecha, sin etiquetas extra
         linea_html = (
-            f"<div style='display:flex; align-items:center; justify-content:space-between; "
+            f"<div style='display:flex; align-items:center; gap:7px; "
             f"padding:5px 8px; margin-bottom:5px; border-radius:6px; "
             f"background:rgba(255,255,255,0.03); font-size:0.90rem;'>"
-            f"  <div style='display:flex; align-items:center; gap:7px;'>"
-            f"    <span>{icono}</span>"
-            f"    {img_eq_html}"
-            f"    <span>{equipo}</span>"
-            f"    <strong style='padding:1px 6px; border-radius:4px; background:rgba(255,255,255,0.08);'>{gf} - {gc}</strong>"
-            f"    {img_riv_html}"
-            f"    <span>{rival}</span>"
-            f"  </div>"
-            f"  <span style='font-size:0.78rem; opacity:0.75; white-space:nowrap;'>{cond_badge}</span>"
+            f"  <span>{icono}</span>"
+            f"  {img_izq}"
+            f"  <span>{nombre_izq}</span>"
+            f"  <strong style='padding:1px 6px; border-radius:4px; background:rgba(255,255,255,0.08);'>{g_izq} - {g_der}</strong>"
+            f"  {img_der}"
+            f"  <span>{nombre_der}</span>"
             f"</div>"
         )
         detalle_partidos.append(linea_html)
@@ -673,11 +669,11 @@ with tab1:
                         f"{img_h}"
                         f"<h3 style='margin:0;'>{local}</h3>"
                         f"<span style='font-size:0.78rem; opacity:0.7;'>🏠 LOCAL</span>"
+                        f"<div style='margin-top:4px; font-size:0.92rem;'>{info_tabla_h}</div>"
+                        f"<div style='margin-top:2px; font-size:0.85rem; opacity:0.85;'>Goles esperados (xG): <strong>{res['lambda_h']:.2f}</strong></div>"
                         f"</div>",
                         unsafe_allow_html=True
                     )
-                    st.markdown(f"<div style='text-align:center; margin-top:4px;'>{info_tabla_h}</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div style='text-align:center; font-size:0.85rem; opacity:0.85;'>Goles esperados (xG): <strong>{res['lambda_h']:.2f}</strong></div>", unsafe_allow_html=True)
 
                 with ch2:
                     st.markdown("<h3 style='text-align:center; margin:0;'>VS</h3>", unsafe_allow_html=True)
@@ -690,11 +686,11 @@ with tab1:
                         f"{img_a}"
                         f"<h3 style='margin:0;'>{visitante}</h3>"
                         f"<span style='font-size:0.78rem; opacity:0.7;'>✈️ VISITANTE</span>"
+                        f"<div style='margin-top:4px; font-size:0.92rem;'>{info_tabla_a}</div>"
+                        f"<div style='margin-top:2px; font-size:0.85rem; opacity:0.85;'>Goles esperados (xG): <strong>{res['lambda_a']:.2f}</strong></div>"
                         f"</div>",
                         unsafe_allow_html=True
                     )
-                    st.markdown(f"<div style='text-align:center; margin-top:4px;'>{info_tabla_a}</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div style='text-align:center; font-size:0.85rem; opacity:0.85;'>Goles esperados (xG): <strong>{res['lambda_a']:.2f}</strong></div>", unsafe_allow_html=True)
 
                 st.divider()
                 st.caption(
