@@ -742,4 +742,210 @@ with tab1:
                         dm1.markdown(
                             f"**🏠 {local} (últ. {nh} casa)**\n"
                             f"- Prom. Goles: **{gfh:.2f}** favor / **{gch:.2f}** contra\n"
-                            f"- BTTS: **{bttsh:.0f}%** | +2.5 G
+                            f"- BTTS: **{bttsh:.0f}%** | +2.5 Goles: **{ovh:.0f}%**"
+                        )
+                        dm2.markdown(
+                            f"**✈️ {visitante} (últ. {na} fuera)**\n"
+                            f"- Prom. Goles: **{gfa:.2f}** favor / **{gca:.2f}** contra\n"
+                            f"- BTTS: **{bttsa:.0f}%** | +2.5 Goles: **{ova:.0f}%**"
+                        )
+
+                momios_liga, creditos_rest = cargar_momios_mercado(LIGAS[liga_sel])
+                momio_mkt = {}
+                for k_ev, val_ev in momios_liga.items():
+                    if local.lower()[:5] in k_ev and visitante.lower()[:5] in k_ev:
+                        momio_mkt = val_ev
+                        break
+
+                if momio_mkt:
+                    info_cred = f" • Créditos API: **{creditos_rest}/500**" if creditos_rest else ""
+                    st.caption(f"📡 Momios sincronizados (Ref: **{momio_mkt.get('casa', 'EU')}**){info_cred}")
+
+                mapa_clave_mkt = {
+                    f"Gana {local} (1)": momio_mkt.get("1", 0.0),
+                    "Empate (X)": momio_mkt.get("X", 0.0),
+                    f"Gana {visitante} (2)": momio_mkt.get("2", 0.0),
+                    "Más de 2.5 Goles": momio_mkt.get("over_2_5", 0.0),
+                    "Ambos Marcan (BTTS)": 0.0
+                }
+
+                mercados = [
+                    (f"Gana {local} (1)", res["prob_1"]),
+                    ("Empate (X)", res["prob_x"]),
+                    (f"Gana {visitante} (2)", res["prob_2"]),
+                    ("Más de 2.5 Goles", res["prob_over25"]),
+                    ("Ambos Marcan (BTTS)", res["prob_btts"]),
+                ]
+                max_p = max(p for _, p in mercados)
+
+                ya_tiene_pick = False
+                if not df_hist_global.empty:
+                    ya_tiene_pick = not df_hist_global[
+                        (df_hist_global["partido"] == partido_str) &
+                        (df_hist_global["estado"] == "Pendiente")
+                    ].empty
+
+                st.subheader("📊 Probabilidades y Detector de Valor")
+                for nombre, prob in mercados:
+                    justa = round(100 / prob, 2) if prob > 0 else 99.0
+                    val_inicial = mapa_clave_mkt.get(nombre, 0.0)
+                    if val_inicial <= 1.01:
+                        val_inicial = justa
+
+                    with st.container(border=True):
+                        cm1, cm2, cm3, cm4 = st.columns([3.5, 1.8, 1.8, 2.2], vertical_alignment="center")
+                        cm1.markdown(f"**{nombre}** {'🔥' if prob == max_p else ''}")
+                        cm2.markdown(f"Prob: **{prob:.1f}%**")
+                        cm3.markdown(f"Justa: **{justa}**")
+                        cuota = cm4.number_input(
+                            nombre,
+                            min_value=1.01,
+                            value=float(val_inicial),
+                            step=0.05,
+                            key=f"c_{local}_{visitante}_{nombre}_{ventana_opcion}_{k_bayes}",
+                            label_visibility="collapsed"
+                        )
+
+                        ev = ((cuota * (prob / 100.0)) - 1.0) * 100.0
+                        if ev >= min_ev:
+                            pct_k, stake_sug = (
+                                calcular_stake_kelly(prob, cuota, bankroll_total, fraccion_kelly, max_riesgo_pct)
+                                if fraccion_kelly > 0 else (0.0, 1.0)
+                            )
+                            stake_fin = max(stake_sug, 0.5) if fraccion_kelly > 0 else 1.0
+
+                            if cuota < 1.50:
+                                st.warning(f"⚠️ Momio bajo (**{cuota}** < 1.50). Alta exigencia de acierto para sencillas.")
+                            if ya_tiene_pick:
+                                st.warning(f"⚠️ Ya tienes un pick pendiente en **{partido_str}**. Evita sobreexponer el mismo partido.")
+
+                            ca, cb = st.columns([4, 1.4], vertical_alignment="center")
+                            ca.success(
+                                f"✅ **VALUE BET (+{ev:.1f}% EV)** | Stake: **{stake_fin:.2f}** ({pct_k}% Bank)"
+                                if fraccion_kelly > 0 else f"✅ **VALUE BET (+{ev:.1f}% EV)** | Stake: **1.00 u**"
+                            )
+                            if cb.button("💾 Guardar", key=f"sv_{local}_{visitante}_{nombre}_{ventana_opcion}", use_container_width=True):
+                                guardar_pick(liga_sel, partido_str, nombre, prob, cuota, ev, stake_fin)
+                                st.toast("Pick guardado en Supabase", icon="✅")
+                                st.rerun()
+                        elif ev <= -10.0:
+                            st.error(f"🚫 **OVERBET / LÍNEA CASTIGADA ({ev:.1f}% EV):** La casa paga muy por debajo del riesgo real (Justa: {justa} vs Casa: {cuota}).")
+
+# ------------------------------------------
+# TAB 2: TABLA GLOBAL DE POSICIONES
+# ------------------------------------------
+with tab2:
+    st.subheader(f"🏆 Clasificación General — {liga_sel}")
+    if not isinstance(df_tabla, pd.DataFrame) or df_tabla.empty:
+        st.info("Tabla de posiciones no disponible para esta competición.")
+    else:
+        st.dataframe(
+            df_tabla,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Pos": st.column_config.NumberColumn("Pos", width="small"),
+                "Escudo": st.column_config.ImageColumn("", width="small"),
+                "Equipo": st.column_config.TextColumn("Equipo", width="medium"),
+                "Pts": st.column_config.NumberColumn("Pts", width="small"),
+            }
+        )
+
+# ------------------------------------------
+# TAB 3: PRÓXIMOS PARTIDOS
+# ------------------------------------------
+with tab3:
+    if df_proximos.empty:
+        st.info("No hay próximos partidos programados en esta liga.")
+    else:
+        st.subheader("📅 Próxima Jornada (Hora Local)")
+        equipos = sorted(list(set(df_jugados["Local"]).union(set(df_jugados["Visitante"])))) if not df_jugados.empty else []
+        for idx, row in df_proximos.head(20).iterrows():
+            with st.container(border=True):
+                c_f, c_m, c_act = st.columns([2.2, 4.5, 1.8], vertical_alignment="center")
+                c_f.markdown(f"📅 **{row['Fecha']}**\n\n⏰ {row['Hora']} • J{row['Jornada']}")
+                c_m.markdown(f"**{row['Local']}** vs **{row['Visitante']}**")
+                if row["Local"] in equipos and row["Visitante"] in equipos:
+                    if c_act.button(
+                        "🎯 Cargar",
+                        key=f"ld_{idx}",
+                        on_click=cargar_partido_callback,
+                        args=(row["Local"], row["Visitante"]),
+                        use_container_width=True
+                    ):
+                        st.toast(f"Cargado: {row['Local']} vs {row['Visitante']}", icon="⚽")
+
+# ------------------------------------------
+# TAB 4: NOTICIAS Y ALINEACIONES
+# ------------------------------------------
+with tab4:
+    st.subheader("📰 Noticias, Bajas y Alineaciones")
+    l_not = st.session_state.get("sel_local", "")
+    v_not = st.session_state.get("sel_vis", "")
+    if l_not and v_not:
+        st.caption(f"Mostrando reportes recientes para **{l_not} vs {v_not}**")
+        jug_buscar = st.text_input("Filtrar por jugador específico (opcional):", placeholder="Ej: Bellingham, Vinicius...", key="filtro_not_jug")
+        if st.button("🔍 Buscar noticias y alineaciones ahora", use_container_width=True):
+            noticias = obtener_noticias_partido(l_not, v_not, jug_buscar)
+            if not noticias:
+                st.info("No se encontraron titulares recientes. Intenta más cerca de la hora del partido.")
+            for n in noticias:
+                with st.container(border=True):
+                    st.markdown(f"**[{n.title}]({n.link})**")
+                    st.caption(n.get("published", ""))
+
+# ------------------------------------------
+# TAB 5: PLANTILLAS
+# ------------------------------------------
+with tab5:
+    st.subheader("👟 Plantillas Oficiales")
+    if not df_jugados.empty:
+        equipos_pl = sorted(list(set(df_jugados["Local"]).union(set(df_jugados["Visitante"]))))
+        eq_pl = st.selectbox("Selecciona equipo", equipos_pl, key="sel_plantilla")
+        if st.button("📋 Cargar plantilla", use_container_width=True):
+            df_pl = obtener_plantilla_equipo(escudos.get(f"{eq_pl}_id"))
+            if not df_pl.empty:
+                st.dataframe(df_pl, use_container_width=True, hide_index=True)
+            else:
+                st.info("Plantilla no disponible para este club en el plan gratuito.")
+
+# ------------------------------------------
+# TAB 6: HISTORIAL Y RENDIMIENTO (SUPABASE)
+# ------------------------------------------
+with tab6:
+    df_h = cargar_historial()
+    if df_h.empty:
+        st.info("Aún no tienes picks guardados en tu base de datos.")
+    else:
+        cerrados = df_h[df_h["estado"].isin(["Ganada", "Perdida"])]
+        jugado_total = cerrados["stake"].sum() if not cerrados.empty else 0.0
+        roi = (beneficio_hist / jugado_total * 100.0) if jugado_total > 0 else 0.0
+        pend_count = len(df_h[df_h["estado"] == "Pendiente"])
+
+        hm1, hm2, hm3, hm4 = st.columns(4)
+        hm1.metric("Bankroll Actual", f"{bankroll_total:.2f}", delta=f"Base: {bankroll_base:.0f}")
+        hm2.metric("Beneficio Neto", f"{beneficio_hist:+.2f}", delta=f"Jugado: {jugado_total:.1f}")
+        hm3.metric("Yield / ROI", f"{roi:+.1f}%")
+        hm4.metric("Picks Totales", len(df_h), delta=f"Pendientes: {pend_count}")
+
+        st.divider()
+        for _, r in df_h.iterrows():
+            with st.container(border=True):
+                ch_a, ch_b, ch_c, ch_d = st.columns([3.5, 3, 2, 0.8], vertical_alignment="center")
+                ch_a.markdown(f"**{r['partido']}** ({r['liga']})\n\n{r['fecha']}")
+                ch_b.markdown(f"**{r['mercado']}**\n\nMomio: **{r['cuota_casa']}** | EV: **{r['valor_ev']:.1f}%** | Stake: **{r['stake']}**")
+                opciones_est = ["Pendiente", "Ganada", "Perdida", "Nula"]
+                idx_est = opciones_est.index(r["estado"]) if r["estado"] in opciones_est else 0
+                nuevo_est = ch_c.selectbox(
+                    "Estado",
+                    opciones_est,
+                    index=idx_est,
+                    key=f"est_{r['id']}",
+                    label_visibility="collapsed"
+                )
+                if nuevo_est != r["estado"]:
+                    actualizar_estado_pick(r["id"], nuevo_est)
+                    st.rerun()
+                if ch_d.button("🗑️", key=f"del_h_{r['id']}", use_container_width=True):
+                    eliminar_pick(r["id"])
+                    st.rerun()
