@@ -354,9 +354,9 @@ def obtener_noticias_partido(local, visitante, jugador_extra=""):
         return []
 
 # ==========================================
-# 5. RESUMEN VISUAL DE ÚLTIMOS 5 PARTIDOS (G / E / P)
+# 5. RESUMEN VISUAL DE ÚLTIMOS 5 PARTIDOS (G / E / P + ESCUDOS)
 # ==========================================
-def obtener_resumen_ultimos_5(df, equipo, solo_condicion=None):
+def obtener_resumen_ultimos_5(df, equipo, escudos, solo_condicion=None):
     if solo_condicion == "Local":
         sub = df[df["Local"] == equipo].tail(5)
     elif solo_condicion == "Visitante":
@@ -367,12 +367,14 @@ def obtener_resumen_ultimos_5(df, equipo, solo_condicion=None):
     g, e, p = 0, 0, 0
     badges = []
     detalle_partidos = []
+    escudo_eq = escudos.get(equipo, "")
 
     for _, row in sub.iterrows():
         es_local = row["Local"] == equipo
         gf = row["GolesLocal"] if es_local else row["GolesVisitante"]
         gc = row["GolesVisitante"] if es_local else row["GolesLocal"]
         rival = row["Visitante"] if es_local else row["Local"]
+        escudo_rival = escudos.get(rival, "")
         cond_tag = "L" if es_local else "V"
 
         if gf > gc:
@@ -388,7 +390,20 @@ def obtener_resumen_ultimos_5(df, equipo, solo_condicion=None):
             badges.append("🔴 **P**")
             icono = "🔴"
 
-        detalle_partidos.append(f"{icono} `{gf}-{gc}` vs {rival} ({cond_tag})")
+        img_eq_html = f"<img src='{escudo_eq}' width='18' style='vertical-align:middle; margin:0 4px;'>" if escudo_eq else ""
+        img_riv_html = f"<img src='{escudo_rival}' width='18' style='vertical-align:middle; margin:0 4px;'>" if escudo_rival else ""
+
+        # Siempre equipo consultado + marcador a la izquierda vs rival a la derecha
+        linea_html = (
+            f"<div style='display:flex; align-items:center; gap:6px; margin-bottom:6px; font-size:0.92rem;'>"
+            f"<span>{icono}</span>"
+            f"{img_eq_html}"
+            f"<strong>{equipo} {gf} - {gc}</strong>"
+            f"{img_riv_html}"
+            f"<span>{rival} <small style='opacity:0.7;'>({cond_tag})</small></span>"
+            f"</div>"
+        )
+        detalle_partidos.append(linea_html)
 
     return {
         "G": g,
@@ -664,10 +679,10 @@ with tab1:
                 # ========================================================
                 # BLOQUE VISUAL: RESUMEN DE ÚLTIMOS 5 PARTIDOS (G / E / P)
                 # ========================================================
-                f5_h_gen = obtener_resumen_ultimos_5(df_jugados, local)
-                f5_a_gen = obtener_resumen_ultimos_5(df_jugados, visitante)
-                f5_h_loc = obtener_resumen_ultimos_5(df_jugados, local, solo_condicion="Local")
-                f5_a_vis = obtener_resumen_ultimos_5(df_jugados, visitante, solo_condicion="Visitante")
+                f5_h_gen = obtener_resumen_ultimos_5(df_jugados, local, escudos)
+                f5_a_gen = obtener_resumen_ultimos_5(df_jugados, visitante, escudos)
+                f5_h_loc = obtener_resumen_ultimos_5(df_jugados, local, escudos, solo_condicion="Local")
+                f5_a_vis = obtener_resumen_ultimos_5(df_jugados, visitante, escudos, solo_condicion="Visitante")
 
                 with st.container(border=True):
                     st.markdown("#### 📊 Forma Reciente (Últimos 5 Partidos)")
@@ -678,14 +693,14 @@ with tab1:
                         st.markdown(f"En Casa: {f5_h_loc['racha_str']}  (`{f5_h_loc['G']}G - {f5_h_loc['E']}E - {f5_h_loc['P']}P`)")
                         with st.expander("Ver marcadores últimos 5"):
                             for d_p in f5_h_gen["detalles"]:
-                                st.markdown(d_p)
+                                st.markdown(d_p, unsafe_allow_html=True)
                     with cf2:
                         st.markdown(f"**✈️ {visitante}**")
                         st.markdown(f"General: {f5_a_gen['racha_str']}  (`{f5_a_gen['G']}G - {f5_a_gen['E']}E - {f5_a_gen['P']}P`)")
                         st.markdown(f"De Visita: {f5_a_vis['racha_str']}  (`{f5_a_vis['G']}G - {f5_a_vis['E']}E - {f5_a_vis['P']}P`)")
                         with st.expander("Ver marcadores últimos 5"):
                             for d_p in f5_a_gen["detalles"]:
-                                st.markdown(d_p)
+                                st.markdown(d_p, unsafe_allow_html=True)
 
                 # BLOQUE DE DATOS DESTACADOS Y TENDENCIAS
                 destacados, metricas = obtener_datos_destacados(df_jugados, local, visitante, ventana_opcion)
