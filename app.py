@@ -246,9 +246,9 @@ def obtener_datos_liga(codigo_liga):
         r_s = requests.get(url_standings, headers=headers, timeout=10)
         if r_s.status_code == 200:
             standings = r_s.json().get("standings", [])
+            filas = []
             for st_blk in standings:
                 if st_blk.get("type") == "TOTAL":
-                    filas = []
                     for row in st_blk.get("table", []):
                         t_name = row["team"].get("shortName") or row["team"].get("name")
                         filas.append({
@@ -263,12 +263,21 @@ def obtener_datos_liga(codigo_liga):
                             "DG": row["goalDifference"],
                             "Pts": row["points"]
                         })
-                    df_tabla = pd.DataFrame(filas)
-                    break
+            if filas:
+                df_tabla = pd.DataFrame(filas)
     except Exception:
         pass
 
     return df_jugados, df_proximos, escudos, df_tabla
+
+def obtener_info_tabla_equipo(df_tabla, equipo):
+    if isinstance(df_tabla, pd.DataFrame) and not df_tabla.empty:
+        fila = df_tabla[df_tabla["Equipo"] == equipo]
+        if not fila.empty:
+            r = fila.iloc[0]
+            dg_str = f"+{r['DG']}" if r["DG"] > 0 else str(r["DG"])
+            return f"🏆 Posición: **#{r['Pos']}** • **{r['Pts']} pts** (PJ: {r['PJ']} | DG: {dg_str})"
+    return "🏆 Posición en tabla no disponible"
 
 @st.cache_data(ttl=1800)
 def cargar_momios_mercado(codigo_liga):
@@ -636,7 +645,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 ])
 
 # ------------------------------------------
-# TAB 1: ANÁLISIS, FORMA 5 PARTIDOS, VARIANZA Y DATOS DESTACADOS
+# TAB 1: ANÁLISIS, POSICIÓN EN TABLA, FORMA 5 Y DATOS DESTACADOS
 # ------------------------------------------
 with tab1:
     if df_jugados.empty:
@@ -692,12 +701,15 @@ with tab1:
             )
             if res:
                 partido_str = f"{local} vs {visitante}"
+                info_tabla_h = obtener_info_tabla_equipo(df_tabla, local)
+                info_tabla_a = obtener_info_tabla_equipo(df_tabla, visitante)
 
                 ch1, ch2, ch3 = st.columns([2, 1, 2], vertical_alignment="center")
                 with ch1:
                     if escudos.get(local):
                         st.image(escudos[local], width=48)
                     st.markdown(f"### {local}")
+                    st.markdown(info_tabla_h)
                     st.caption(f"Goles esperados (xG): **{res['lambda_h']:.2f}**")
                 with ch2:
                     st.markdown("<h3 style='text-align:center;'>VS</h3>", unsafe_allow_html=True)
@@ -705,6 +717,7 @@ with tab1:
                     if escudos.get(visitante):
                         st.image(escudos[visitante], width=48)
                     st.markdown(f"### {visitante}")
+                    st.markdown(info_tabla_a)
                     st.caption(f"Goles esperados (xG): **{res['lambda_a']:.2f}**")
 
                 st.caption(
