@@ -368,7 +368,7 @@ def obtener_resumen_ultimos_5(df, equipo, escudos, solo_condicion=None):
     badges = []
     detalle_partidos = []
 
-    for _, row in sub.iterrows():
+    for _, row in sub.iloc[::-1].iterrows():
         es_local = row["Local"] == equipo
         gf = row["GolesLocal"] if es_local else row["GolesVisitante"]
         gc = row["GolesVisitante"] if es_local else row["GolesLocal"]
